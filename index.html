@@ -21,6 +21,7 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/prop-types@15/prop-types.js"></script>
 <script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <link rel="stylesheet" href="https://unpkg.com/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://unpkg.com/katex@0.16.9/dist/katex.min.js"></script>
@@ -242,6 +243,9 @@ const KEYS = {
     teacherPass: "sougaku-seiseki:teacherPass",
     manuals: "sougaku-seiseki:manuals",
 };
+function scoresKeyFor(testId) {
+    return "sougaku-seiseki:scores:" + testId;
+}
 async function safeGet(key, fallback) {
     if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.indexOf("PASTE_YOUR") === 0)
         return fallback;
@@ -283,7 +287,14 @@ async function safeSet(key, value) {
 }
 function scoreFor(scores, studentId, testId) {
     const r = scores.find((sc) => sc.studentId === studentId && sc.testId === testId);
-    return r ? r.score : null;
+    return r && r.score != null ? r.score : null;
+}
+function hasEntry(scores, studentId, testId) {
+    return !!scores.find((sc) => sc.studentId === studentId && sc.testId === testId);
+}
+function isAbsentEntry(scores, studentId, testId) {
+    const r = scores.find((sc) => sc.studentId === studentId && sc.testId === testId);
+    return !!(r && r.absent);
 }
 function manualsFor(manuals, tag) {
     return manuals.filter((m) => m.tag === tag);
@@ -299,7 +310,7 @@ function computeWeakUnits(scores, students, tests, studentId) {
             return;
         const myPct = (mine / t.maxScore) * 100;
         const classVals = scores
-            .filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId))
+            .filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId) && sc.score != null)
             .map((sc) => (sc.score / t.maxScore) * 100);
         const classPct = avg(classVals);
         t.tags.forEach((tag) => {
@@ -328,7 +339,7 @@ function computeRanking(scores, students, tests, courseFilter) {
         const pcts = mine
             .map((sc) => {
             const t = tests.find((tt) => tt.id === sc.testId);
-            return t && t.maxScore ? (sc.score / t.maxScore) * 100 : null;
+            return t && t.maxScore && sc.score != null ? (sc.score / t.maxScore) * 100 : null;
         })
             .filter((v) => v != null);
         return { id: s.id, name: s.name, avgPct: avg(pcts), count: pcts.length };
@@ -338,7 +349,7 @@ function computeRanking(scores, students, tests, courseFilter) {
 }
 function studentPrimaryCourse(scores, tests, studentId) {
     const myTests = tests
-        .filter((t) => scoreFor(scores, studentId, t.id) != null)
+        .filter((t) => hasEntry(scores, studentId, t.id))
         .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     if (!myTests.length) return null;
     const counts = {};
@@ -366,7 +377,7 @@ function graduateComparison(scores, students, tests, testName, studentTargetUniv
         .filter((sc) => matchingTestIds.includes(sc.testId) && ids.includes(sc.studentId))
         .map((sc) => {
         const t = testsById[sc.testId];
-        return t && t.maxScore ? (sc.score / t.maxScore) * 100 : null;
+        return t && t.maxScore && sc.score != null ? (sc.score / t.maxScore) * 100 : null;
     })
         .filter((v) => v != null);
     return { avg: avg(pcts), matched: sameUniv.length > 0, n: pcts.length };
@@ -540,6 +551,9 @@ function computeTestStats(scores, students, tests, testId) {
         .map((s) => ({ id: s.id, name: s.name, score: scoreFor(scores, s.id, testId) }))
         .filter((r) => r.score != null)
         .sort((a, b) => b.score - a.score);
+    const absentees = students
+        .filter((s) => activeIds.includes(s.id) && isAbsentEntry(scores, s.id, testId))
+        .map((s) => ({ id: s.id, name: s.name }));
     const vals = rows.map((r) => r.score);
     const n = vals.length;
     const average = avg(vals);
@@ -551,7 +565,7 @@ function computeTestStats(scores, students, tests, testId) {
     const histogram = n ? computeHistogram(rows, test.maxScore, 10) : [];
     const ceilingPct = n ? (rows.filter((r) => r.score / test.maxScore >= 0.9).length / n) * 100 : 0;
     const floorPct = n ? (rows.filter((r) => r.score / test.maxScore <= 0.1).length / n) * 100 : 0;
-    return { test, rows, n, average, max, min, median, sd, histogram, ceilingPct, floorPct };
+    return { test, rows, absentees, n, average, max, min, median, sd, histogram, ceilingPct, floorPct };
 }
 function computeStrugglingStudents(scores, students, tests, limit, courseFilter) {
     const ranking = computeRanking(scores, students, tests, courseFilter);
@@ -572,7 +586,7 @@ function computeStrugglingStudents(scores, students, tests, limit, courseFilter)
             latestName = latest.name;
             const my = scoreFor(scores, r.id, latest.id);
             const classVals = scores
-                .filter((sc) => sc.testId === latest.id && activeIds.includes(sc.studentId))
+                .filter((sc) => sc.testId === latest.id && activeIds.includes(sc.studentId) && sc.score != null)
                 .map((sc) => sc.score);
             const cAvg = avg(classVals);
             latestDelta = cAvg == null ? null : ((my / latest.maxScore) * 100) - ((cAvg / latest.maxScore) * 100);
@@ -620,23 +634,25 @@ function buildPrintableRanking(stats, students, title, showAllNames) {
 <title>${esc(title)}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@700;900&display=swap');
-  body{ font-family:'Zen Kaku Gothic New', sans-serif; padding:24px; color:#111; }
-  table{ border-collapse:collapse; width:100%; }
-  th, td{ border:2px solid #333; padding:9px 10px; text-align:center; font-size:16px; }
-  td.name-col{ text-align:left; padding-left:16px; }
-  .title-row td{ font-size:24px; font-weight:900; background:#fff; padding:12px; }
-  .head-row td{ background:#d9d9d9; font-weight:700; font-size:17px; }
+  @page{ size:A4; margin:9mm; }
+  body{ font-family:'Zen Kaku Gothic New', sans-serif; padding:0; margin:0; color:#111; }
+  table{ border-collapse:collapse; width:100%; max-width:190mm; margin:0 auto; table-layout:fixed; }
+  th, td{ border:0.75pt solid #333; padding:1.5pt 5pt; text-align:center; font-size:7.5pt; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  td.name-col{ text-align:left; padding-left:8pt; }
+  .title-row td{ font-size:13pt; font-weight:900; background:#fff; padding:5pt; }
+  .head-row td{ background:#d9d9d9; font-weight:700; font-size:8pt; padding:3pt 5pt; }
   .rank1{ background:#f4a6c6; font-weight:700; }
   .rank2{ background:#fdf0a0; font-weight:700; }
   .rank3{ background:#c7ecc0; font-weight:700; }
-  .avg-row td{ font-weight:900; font-size:19px; border-top:3px solid #333; }
-  .toolbar{ margin-bottom:16px; }
+  .avg-row td{ font-weight:900; font-size:9pt; border-top:1.5pt solid #333; padding:3pt 5pt; }
+  .toolbar{ margin-bottom:10pt; }
   .toolbar button{ font-family:inherit; font-size:14px; padding:8px 18px; background:#1C2541; color:#fff; border:none; border-radius:4px; cursor:pointer; }
   @media print{ .toolbar{ display:none; } body{ padding:0; } }
 </style></head>
 <body>
   <div class="toolbar"><button onclick="window.print()">印刷 / PDFとして保存</button></div>
   <table>
+    <colgroup><col style="width:26%"><col style="width:26%"><col style="width:16%"><col style="width:16%"><col style="width:16%"></colgroup>
     <tr class="title-row"><td colspan="3">${esc(title)}</td><td colspan="2">${esc(stats.test.name)}</td></tr>
     <tr class="head-row"><td>名前</td><td>高校名</td><td>得点</td><td>偏差値</td><td>順位</td></tr>
     ${rowsHtml}
@@ -651,6 +667,91 @@ function buildPrintableRanking(stats, students, title, showAllNames) {
     win.document.write(html);
     win.document.close();
 }
+function buildOverallRankingPdf(ranking, students, title, showAllNames, courseFilter) {
+    const vals = ranking.map((r) => r.avgPct);
+    const mean = avg(vals);
+    const sd = stddev(vals);
+    const rowsDesc = [...ranking].sort((a, b) => b.avgPct - a.avgPct).map((r) => ({ id: r.id, name: r.name, score: r.avgPct, count: r.count }));
+    const rankedRaw = competitionRank(rowsDesc);
+    const ranked = rankedRaw.map((r) => {
+        const hensachi = sd && sd > 0 ? 50 + (10 * (r.score - mean)) / sd : 50;
+        const student = students.find((s) => s.id === r.id);
+        return { ...r, hensachi, highSchool: (student && student.highSchool) || "" };
+    });
+    const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const rowsHtml = ranked
+        .map((r) => {
+        const showName = showAllNames || r.hensachi >= 50;
+        const rowClass = r.rank === 1 ? "rank1" : r.rank === 2 ? "rank2" : r.rank === 3 ? "rank3" : "";
+        return `<tr class="${rowClass}">
+        <td class="name-col">${showName ? esc(r.name) : ""}</td>
+        <td>${esc(r.highSchool)}</td>
+        <td>${r.score.toFixed(1)}%</td>
+        <td>${r.hensachi.toFixed(1)}</td>
+        <td>${r.rank}</td>
+      </tr>`;
+    })
+        .join("\n");
+    const subtitle = courseFilter ? courseFilter : "\u5168\u4F53";
+    const html = `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>${esc(title)}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@700;900&display=swap');
+  @page{ size:A4; margin:9mm; }
+  body{ font-family:'Zen Kaku Gothic New', sans-serif; padding:0; margin:0; color:#111; }
+  table{ border-collapse:collapse; width:100%; max-width:190mm; margin:0 auto; table-layout:fixed; }
+  th, td{ border:0.75pt solid #333; padding:1.5pt 5pt; text-align:center; font-size:7.5pt; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  td.name-col{ text-align:left; padding-left:8pt; }
+  .title-row td{ font-size:13pt; font-weight:900; background:#fff; padding:5pt; }
+  .head-row td{ background:#d9d9d9; font-weight:700; font-size:8pt; padding:3pt 5pt; }
+  .rank1{ background:#f4a6c6; font-weight:700; }
+  .rank2{ background:#fdf0a0; font-weight:700; }
+  .rank3{ background:#c7ecc0; font-weight:700; }
+  .avg-row td{ font-weight:900; font-size:9pt; border-top:1.5pt solid #333; padding:3pt 5pt; }
+  .toolbar{ margin-bottom:10pt; }
+  .toolbar button{ font-family:inherit; font-size:14px; padding:8px 18px; background:#1C2541; color:#fff; border:none; border-radius:4px; cursor:pointer; }
+  @media print{ .toolbar{ display:none; } body{ padding:0; } }
+</style></head>
+<body>
+  <div class="toolbar"><button onclick="window.print()">印刷 / PDFとして保存</button></div>
+  <table>
+    <colgroup><col style="width:26%"><col style="width:26%"><col style="width:16%"><col style="width:16%"><col style="width:16%"></colgroup>
+    <tr class="title-row"><td colspan="3">${esc(title)}</td><td colspan="2">総合ランキング（${esc(subtitle)}）</td></tr>
+    <tr class="head-row"><td>名前</td><td>高校名</td><td>総合得点率</td><td>偏差値</td><td>順位</td></tr>
+    ${rowsHtml}
+    <tr class="avg-row"><td colspan="3"></td><td>平均</td><td>${mean == null ? "―" : mean.toFixed(1) + "%"}</td></tr>
+  </table>
+</body></html>`;
+    const win = window.open("", "_blank");
+    if (!win) {
+        alert("ポップアップがブロックされました。ブラウザのポップアップ許可設定を確認してください。");
+        return;
+    }
+    win.document.write(html);
+    win.document.close();
+}
+function OverallRankingExport({ ranking, students, courseFilter }) {
+    const [title, setTitle] = useState(courseFilter ? `${courseFilter} 総合ランキング` : "総合ランキング");
+    const [showAllNames, setShowAllNames] = useState(true);
+    useEffect(() => { setTitle(courseFilter ? `${courseFilter} 総合ランキング` : "総合ランキング"); }, [courseFilter]);
+    return (React.createElement("div", { style: { marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" } },
+        React.createElement("div", { style: { marginBottom: 8, fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 600 } }, "PDF\u5E33\u7968\u3092\u51FA\u529B"),
+        React.createElement("div", { className: "row2", style: { alignItems: "flex-end" } },
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "\u5E33\u7968\u30BF\u30A4\u30C8\u30EB"),
+                React.createElement("input", { value: title, onChange: (e) => setTitle(e.target.value), placeholder: "\u4F8B\uFF09\u9AD81\u6570\u5B66\u300A\u59EB\u8DEF\u897F\u300B" })),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "\u6C0F\u540D\u306E\u8868\u793A"),
+                React.createElement("select", { value: showAllNames ? "all" : "hensachi50", onChange: (e) => setShowAllNames(e.target.value === "all") },
+                    React.createElement("option", { value: "all" }, "\u5168\u54E1\u306E\u6C0F\u540D\u3092\u8868\u793A"),
+                    React.createElement("option", { value: "hensachi50" }, "\u504F\u5DEE\u502450\u4EE5\u4E0A\u306E\u307F\u6C0F\u540D\u3092\u8868\u793A")))),
+        React.createElement("button", { className: "btn", onClick: () => buildOverallRankingPdf(ranking, students, title, showAllNames, courseFilter) },
+            React.createElement(Icon, { name: "clipboard", size: 14 }),
+            "\u30D7\u30EC\u30D3\u30E5\u30FC\u3092\u958B\u304F\uFF08\u65B0\u3057\u3044\u30BF\u30D6\uFF09"),
+        React.createElement("div", { className: "note", style: { marginTop: 10, fontSize: 11.5, color: "var(--ink-soft)" } }, "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u5E33\u7968\u304C\u958B\u304D\u307E\u3059\u3002\u30BF\u30D6\u5185\u306E\u300C\u5370\u5237 / PDF\u3068\u3057\u3066\u4FDD\u5B58\u300D\u30DC\u30BF\u30F3\u304B\u3089\u3001\u5370\u5237\u30C0\u30A4\u30A2\u30ED\u30B0\u306E\u51FA\u529B\u5148\u3092\u300CPDF\u306B\u4FDD\u5B58\u300D\u306B\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002")));
+}
+
 function RankingExport({ stats, students }) {
     const [title, setTitle] = useState(stats.test.name);
     const [showAllNames, setShowAllNames] = useState(true);
@@ -687,6 +788,9 @@ function TestAnalytics({ students, tests, scores }) {
     }, [courseFilter, tests.length]);
     const stats = testId ? computeTestStats(scores, students, tests, testId) : null;
     const ranking = useMemo(() => computeRanking(scores, students, tests, courseFilter || undefined), [scores, students, tests, courseFilter]);
+    const [branchFilter, setBranchFilter] = useState("");
+    const branches = useMemo(() => [...new Set(students.filter((s) => !s.isGraduate && s.schoolBranch).map((s) => s.schoolBranch))].sort(), [students]);
+    const filteredRanking = useMemo(() => (branchFilter ? ranking.filter((r) => { const s = students.find((st) => st.id === r.id); return s && s.schoolBranch === branchFilter; }) : ranking), [ranking, branchFilter, students]);
     const struggling = useMemo(() => computeStrugglingStudents(scores, students, tests, Math.min(5, ranking.length), courseFilter || undefined), [scores, students, tests, ranking.length, courseFilter]);
     if (!tests.length) {
         return React.createElement("div", { className: "card" },
@@ -760,16 +864,21 @@ function TestAnalytics({ students, tests, scores }) {
                                 React.createElement("th", null, "\u6C0F\u540D"),
                                 React.createElement("th", null, "\u5F97\u70B9"),
                                 React.createElement("th", null, "\u5F97\u70B9\u7387"))),
-                        React.createElement("tbody", null, stats.rows.map((r, i) => (React.createElement("tr", { key: r.id },
-                            React.createElement("td", { className: "ss-mono" }, i + 1),
-                            React.createElement("td", null, r.name),
-                            React.createElement("td", { className: "ss-mono" },
-                                r.score,
-                                "/",
-                                stats.test.maxScore),
-                            React.createElement("td", { className: "ss-mono" },
-                                fmt1((r.score / stats.test.maxScore) * 100),
-                                "%"))))))),
+                        React.createElement("tbody", null,
+                            stats.rows.map((r, i) => (React.createElement("tr", { key: r.id },
+                                React.createElement("td", { className: "ss-mono" }, i + 1),
+                                React.createElement("td", null, r.name),
+                                React.createElement("td", { className: "ss-mono" },
+                                    r.score,
+                                    "/",
+                                    stats.test.maxScore),
+                                React.createElement("td", { className: "ss-mono" },
+                                    fmt1((r.score / stats.test.maxScore) * 100),
+                                    "%")))),
+                            stats.absentees.map((a) => (React.createElement("tr", { key: a.id, style: { color: "var(--ink-soft)" } },
+                                React.createElement("td", { className: "ss-mono" }, "\u2015"),
+                                React.createElement("td", null, a.name),
+                                React.createElement("td", { colSpan: 2 }, "\u672A\u53D7\u9A13"))))))),
                 React.createElement(RankingExport, { stats: stats, students: students })))),
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "section-title" },
@@ -778,21 +887,36 @@ function TestAnalytics({ students, tests, scores }) {
                 courseFilter && React.createElement("span", { style: { fontSize: 12, color: "var(--ink-soft)", fontWeight: 400 } },
                     "\u3000\u2015 ",
                     courseFilter)),
-            ranking.length === 0 ? (React.createElement("div", { className: "empty" }, "\u307E\u3060\u5F97\u70B9\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093")) : (React.createElement("div", { className: "tbl-wrap" },
-                React.createElement("table", null,
-                    React.createElement("thead", null,
-                        React.createElement("tr", null,
-                            React.createElement("th", null, "\u9806\u4F4D"),
-                            React.createElement("th", null, "\u6C0F\u540D"),
-                            React.createElement("th", null, "\u7DCF\u5408\u5F97\u70B9\u7387"),
-                            React.createElement("th", null, "\u53D7\u9A13\u56DE\u6570"))),
-                    React.createElement("tbody", null, ranking.map((r, i) => (React.createElement("tr", { key: r.id },
-                        React.createElement("td", { className: "ss-mono" }, i + 1),
-                        React.createElement("td", null, r.name),
-                        React.createElement("td", { className: "ss-mono" },
-                            fmt1(r.avgPct),
-                            "%"),
-                        React.createElement("td", { className: "ss-mono" }, r.count))))))))),
+            ranking.length === 0 ? (React.createElement("div", { className: "empty" }, "\u307E\u3060\u5F97\u70B9\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093")) : (React.createElement(React.Fragment, null,
+                branches.length > 0 && (React.createElement("div", { style: { marginBottom: 12, display: "flex", alignItems: "center", gap: 8 } },
+                    React.createElement("label", { style: { fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 600, whiteSpace: "nowrap" } }, "\u6821\u820E\u30D5\u30A3\u30EB\u30BF\u30FC\uFF1A"),
+                    React.createElement("select", { value: branchFilter, onChange: (e) => setBranchFilter(e.target.value), style: { fontSize: 13, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--card)", color: "var(--ink)" } },
+                        React.createElement("option", { value: "" }, `全体 (${ranking.length}名)`),
+                        branches.map((b) => {
+                            const count = ranking.filter((r) => { const s = students.find((st) => st.id === r.id); return s && s.schoolBranch === b; }).length;
+                            return React.createElement("option", { key: b, value: b }, `${b} (${count}名)`);
+                        })))),
+                React.createElement("div", { className: "tbl-wrap" },
+                    React.createElement("table", null,
+                        React.createElement("thead", null,
+                            React.createElement("tr", null,
+                                React.createElement("th", null, "\u9806\u4F4D"),
+                                React.createElement("th", null, "\u6C0F\u540D"),
+                                !branchFilter && React.createElement("th", null, "\u6821\u820E"),
+                                React.createElement("th", null, "\u7DCF\u5408\u5F97\u70B9\u7387"),
+                                React.createElement("th", null, "\u53D7\u9A13\u56DE\u6570"))),
+                        React.createElement("tbody", null, filteredRanking.map((r, i) => {
+                            const student = students.find((s) => s.id === r.id);
+                            return (React.createElement("tr", { key: r.id },
+                                React.createElement("td", { className: "ss-mono" }, i + 1),
+                                React.createElement("td", null, r.name),
+                                !branchFilter && React.createElement("td", { style: { fontSize: 12, color: "var(--ink-soft)" } }, (student && student.schoolBranch) || "―"),
+                                React.createElement("td", { className: "ss-mono" },
+                                    fmt1(r.avgPct),
+                                    "%"),
+                                React.createElement("td", { className: "ss-mono" }, r.count)));
+                        })))),
+                React.createElement(OverallRankingExport, { ranking: ranking, students: students, courseFilter: courseFilter })))),
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "section-title" },
                 React.createElement("span", { className: "n" }, "3"),
@@ -839,34 +963,59 @@ function buildTrendSvg(trendData, width, height) {
     const h = height - padding * 2;
     const n = trendData.length;
     const xStep = n > 1 ? w / (n - 1) : 0;
+
+    const allPcts = [];
+    trendData.forEach((d) => {
+        if (d.maxScore) {
+            allPcts.push((d.self / d.maxScore) * 100);
+            if (d.classAvg != null) allPcts.push((d.classAvg / d.maxScore) * 100);
+        }
+    });
+    let rawMin = allPcts.length ? Math.min(...allPcts) : 0;
+    let rawMax = allPcts.length ? Math.max(...allPcts) : 100;
+    // round out to nearest 10, keep a sensible minimum span so flat data isn't over-zoomed
+    let yMin = Math.max(0, Math.floor(rawMin / 10) * 10 - 5);
+    let yMax = Math.min(100, Math.ceil(rawMax / 10) * 10 + 5);
+    if (yMax - yMin < 30) {
+        const mid = (yMax + yMin) / 2;
+        yMin = Math.max(0, mid - 15);
+        yMax = Math.min(100, mid + 15);
+    }
+    yMin = Math.floor(yMin / 5) * 5;
+    yMax = Math.ceil(yMax / 5) * 5;
+    const yRange = yMax - yMin || 1;
+
+    const toY = (pct) => padding + h - ((pct - yMin) / yRange) * h;
+
     const pts = trendData.map((d, i) => {
         const x = padding + i * xStep;
         const selfPct = d.maxScore ? (d.self / d.maxScore) * 100 : 0;
         const clsPct = d.classAvg == null || !d.maxScore ? null : (d.classAvg / d.maxScore) * 100;
-        const y = padding + h - (selfPct / 100) * h;
-        const yCls = clsPct == null ? null : padding + h - (clsPct / 100) * h;
-        return { x, y, yCls };
+        return { x, y: toY(selfPct), yCls: clsPct == null ? null : toY(clsPct) };
     });
     const selfPath = pts.map((p, i) => (i === 0 ? "M" : "L") + p.x.toFixed(1) + "," + p.y.toFixed(1)).join(" ");
     const clsPts = pts.filter((p) => p.yCls != null);
     const clsPath = clsPts.map((p, i) => (i === 0 ? "M" : "L") + p.x.toFixed(1) + "," + p.yCls.toFixed(1)).join(" ");
-    const gridLines = [0, 25, 50, 75, 100]
+
+    const tickCount = 4;
+    const ticks = Array.from({ length: tickCount + 1 }, (_, i) => Math.round(yMin + (yRange * i) / tickCount));
+    const gridLines = ticks
         .map((pct) => {
-        const y = padding + h - (pct / 100) * h;
+        const y = toY(pct);
         return `<line x1="${padding}" y1="${y}" x2="${padding + w}" y2="${y}" stroke="#e8e8e2" stroke-width="1"/><text x="${padding - 6}" y="${y + 3}" font-size="9" text-anchor="end" fill="#888">${pct}%</text>`;
     })
         .join("");
-    const dots = pts.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#1C2541"/>`).join("");
-    const clsDots = clsPts.map((p) => `<circle cx="${p.x}" cy="${p.yCls}" r="2.5" fill="#9AA3BC"/>`).join("");
+    const dots = pts.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3.2" fill="#1C2541"/>`).join("");
+    const clsDots = clsPts.map((p) => `<circle cx="${p.x}" cy="${p.yCls}" r="2.6" fill="#9AA3BC"/>`).join("");
     const labelEvery = Math.max(1, Math.ceil(n / 9));
     const labels = pts.map((p, i) => (i % labelEvery === 0 ? `<text x="${p.x}" y="${padding + h + 16}" font-size="9" text-anchor="middle" fill="#555">${i + 1}</text>` : "")).join("");
     return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="max-width:100%;">
     ${gridLines}
-    ${clsPath ? `<path d="${clsPath}" fill="none" stroke="#9AA3BC" stroke-width="1.5" stroke-dasharray="4 3"/>` : ""}
-    <path d="${selfPath}" fill="none" stroke="#1C2541" stroke-width="2.2"/>
+    ${clsPath ? `<path d="${clsPath}" fill="none" stroke="#9AA3BC" stroke-width="1.8" stroke-dasharray="4 3"/>` : ""}
+    <path d="${selfPath}" fill="none" stroke="#1C2541" stroke-width="2.5"/>
     ${clsDots}${dots}${labels}
-    <circle cx="${padding + w + 60}" cy="10" r="3" fill="#1C2541"/><text x="${padding + w + 68}" y="13" font-size="10" fill="#333">自分</text>
-    <circle cx="${padding + w + 110}" cy="10" r="2.5" fill="#9AA3BC"/><text x="${padding + w + 118}" y="13" font-size="10" fill="#333">平均</text>
+    <circle cx="${padding + w - 90}" cy="10" r="3" fill="#1C2541"/><text x="${padding + w - 82}" y="13" font-size="9" fill="#333">自分</text>
+    <circle cx="${padding + w - 40}" cy="10" r="2.5" fill="#9AA3BC"/><text x="${padding + w - 32}" y="13" font-size="9" fill="#333">平均</text>
   </svg>`;
 }
 function buildStudentReportSection(student, students, tests, scores, manuals) {
@@ -877,18 +1026,18 @@ function buildStudentReportSection(student, students, tests, scores, manuals) {
         .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     const trendData = myTests.map((t) => {
         const my = scoreFor(scores, student.id, t.id);
-        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId)).map((sc) => sc.score);
+        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId) && sc.score != null).map((sc) => sc.score);
         return { name: t.name, self: my, classAvg: avg(classVals), maxScore: t.maxScore };
     });
     const myCourse = studentPrimaryCourse(scores, tests, student.id);
     const ranking = computeRanking(scores, students, tests, myCourse);
     const rankRow = ranking.find((r) => r.id === student.id);
     const myRankIdx = ranking.findIndex((r) => r.id === student.id);
-    const weak = computeWeakUnits(scores, students, tests, student.id);
+    const weak = computeWeakUnits(scores, students, tests, student.id).filter((w) => w.gap != null);
     const testRowsHtml = myTests
         .map((t) => {
         const my = scoreFor(scores, student.id, t.id);
-        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId)).map((sc) => sc.score);
+        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId) && sc.score != null).map((sc) => sc.score);
         const cAvg = avg(classVals);
         const d = cAvg == null ? null : my - cAvg;
         const g = graduateComparison(scores, students, tests, t.name, student.targetUniv);
@@ -898,42 +1047,34 @@ function buildStudentReportSection(student, students, tests, scores, manuals) {
         <td class="l">${esc(t.name)}</td><td>${esc(t.date || "―")}</td>
         <td>${my}/${t.maxScore}</td><td>${cAvg == null ? "―" : cAvg.toFixed(1)}</td>
         <td class="${d > 0 ? "up" : d < 0 ? "down" : ""}">${d == null ? "―" : (d > 0 ? "+" : "") + d.toFixed(1)}</td>
-        <td>${g.avg == null ? "―" : g.avg.toFixed(1) + "%"}</td>
         <td class="${gd > 0 ? "up" : gd < 0 ? "down" : ""}">${gd == null ? "―" : (gd > 0 ? "+" : "") + gd.toFixed(1)}</td>
       </tr>`;
     })
         .join("");
-    const weakRowsHtml = weak
-        .map((w) => `<tr>
-      <td class="l">${esc(w.tag)}</td>
-      <td>${w.myAvg == null ? "―" : w.myAvg.toFixed(1) + "%"}</td>
-      <td>${w.classAvg == null ? "―" : w.classAvg.toFixed(1) + "%"}</td>
-      <td class="${w.gap < 0 ? "down" : "up"}">${w.gap == null ? "―" : (w.gap > 0 ? "+" : "") + w.gap.toFixed(1)}</td>
-    </tr>`)
-        .join("");
-    const svg = buildTrendSvg(trendData, 620, 190);
+    const weakLine = weak.length
+        ? weak.map((w) => `${esc(w.tag)}<span class="${w.gap < 0 ? "down" : "up"}">${w.gap > 0 ? "+" : ""}${w.gap.toFixed(1)}</span>`).join("　/　")
+        : "データがありません";
+    const svg = buildTrendSvg(trendData, 550, 95);
     return `<section class="report">
     <div class="rep-head">
-      <div class="rep-name">${esc(student.name)} さんの成績帳票</div>
+      <div><span class="rep-name">${esc(student.name)}</span> <span class="rep-meta">さんの成績帳票</span></div>
       <div class="rep-meta">${esc(student.highSchool || "―")} ／ 志望大学：${esc(student.targetUniv || "―")} ／ 出力日：${new Date().toLocaleDateString("ja-JP")}</div>
     </div>
     <div class="rep-stats">
-      <div class="rep-stat"><div class="rl">総合得点率</div><div class="rv">${rankRow ? rankRow.avgPct.toFixed(1) + "%" : "―"}</div></div>
-      <div class="rep-stat"><div class="rl">受講者ランク${myCourse ? "（" + esc(myCourse) + "）" : ""}</div><div class="rv">${myRankIdx >= 0 ? myRankIdx + 1 + " / " + ranking.length + "位" : "―"}</div></div>
-      <div class="rep-stat"><div class="rl">受験回数</div><div class="rv">${myTests.length}回</div></div>
+      <div class="rep-stat"><span class="rl">総合得点率</span><span class="rv">${rankRow ? rankRow.avgPct.toFixed(1) + "%" : "―"}</span></div>
+      <div class="rep-stat"><span class="rl">受講者ランク${myCourse ? "（" + esc(myCourse) + "）" : ""}</span><span class="rv">${myRankIdx >= 0 ? myRankIdx + 1 + " / " + ranking.length + "位" : "―"}</span></div>
+      <div class="rep-stat"><span class="rl">受験回数</span><span class="rv">${myTests.length}回</span></div>
     </div>
     <div class="rep-h2">成績推移（自分 vs クラス平均）</div>
     ${svg || '<p class="empty">データがありません</p>'}
-    <div class="rep-h2">テスト別成績</div>
+    <div class="rep-h2">テスト別成績（全${myTests.length}回）</div>
     <table class="rep-table">
-      <thead><tr><th>テスト</th><th>実施日</th><th>自分</th><th>平均</th><th>差</th><th>先輩平均</th><th>先輩との差</th></tr></thead>
-      <tbody>${testRowsHtml || '<tr><td colspan="7">データがありません</td></tr>'}</tbody>
+      <colgroup><col style="width:34%"><col style="width:14%"><col style="width:14%"><col style="width:13%"><col style="width:12%"><col style="width:13%"></colgroup>
+      <thead><tr><th>テスト</th><th>実施日</th><th>自分</th><th>平均</th><th>差</th><th>先輩差</th></tr></thead>
+      <tbody>${testRowsHtml || '<tr><td colspan="6">データがありません</td></tr>'}</tbody>
     </table>
-    <div class="rep-h2">苦手分野</div>
-    <table class="rep-table">
-      <thead><tr><th>単元</th><th>自分の得点率</th><th>クラス平均</th><th>差</th></tr></thead>
-      <tbody>${weakRowsHtml || '<tr><td colspan="4">単元タグ付きのデータがありません</td></tr>'}</tbody>
-    </table>
+    <div class="rep-h2">苦手分野（クラス平均との差）</div>
+    <div class="weak-line">${weakLine}</div>
   </section>`;
 }
 function openStudentReports(students, tests, scores, manuals, targetIds) {
@@ -946,27 +1087,29 @@ function openStudentReports(students, tests, scores, manuals, targetIds) {
 <html lang="ja"><head><meta charset="UTF-8"><title>個人成績帳票</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@700&family=Zen+Kaku+Gothic+New:wght@400;600;700;900&display=swap');
+  @page{ size:A4; margin:8mm; }
   body{ font-family:'Zen Kaku Gothic New', sans-serif; padding:0; margin:0; color:#1C2541; }
-  .toolbar{ padding:16px 24px; }
+  .toolbar{ padding:12px 16px; }
   .toolbar button{ font-family:inherit; font-size:14px; padding:8px 18px; background:#1C2541; color:#fff; border:none; border-radius:4px; cursor:pointer; }
-  .report{ padding:28px 32px; page-break-after:always; }
+  .report{ padding:0; page-break-after:always; width:194mm; margin:0 auto; }
   .report:last-child{ page-break-after:auto; }
-  .rep-head{ border-bottom:2px solid #1C2541; padding-bottom:10px; margin-bottom:16px; }
-  .rep-name{ font-family:'Zen Old Mincho', serif; font-size:22px; font-weight:700; }
-  .rep-meta{ font-size:12.5px; color:#5B6685; margin-top:4px; }
-  .rep-stats{ display:flex; gap:16px; margin-bottom:20px; }
-  .rep-stat{ border:1px solid #ddd; border-radius:4px; padding:10px 16px; flex:1; }
-  .rl{ font-size:11px; color:#5B6685; margin-bottom:4px; }
-  .rv{ font-size:20px; font-weight:700; font-family:'Zen Kaku Gothic New'; }
-  .rep-h2{ font-size:15px; font-weight:700; margin:20px 0 8px; border-left:4px solid #1C2541; padding-left:8px; }
-  table.rep-table{ border-collapse:collapse; width:100%; margin-bottom:6px; }
-  table.rep-table th, table.rep-table td{ border:1px solid #ccc; padding:6px 8px; font-size:12px; text-align:center; }
+  .rep-head{ border-bottom:1.5pt solid #1C2541; padding-bottom:4pt; margin-bottom:6pt; display:flex; justify-content:space-between; align-items:baseline; }
+  .rep-name{ font-family:'Zen Old Mincho', serif; font-size:15pt; font-weight:700; }
+  .rep-meta{ font-size:8pt; color:#5B6685; }
+  .rep-stats{ display:flex; gap:8pt; margin-bottom:6pt; }
+  .rep-stat{ border:0.75pt solid #ddd; border-radius:3pt; padding:3pt 8pt; flex:1; display:flex; align-items:baseline; justify-content:space-between; }
+  .rl{ font-size:7.5pt; color:#5B6685; }
+  .rv{ font-size:11pt; font-weight:700; font-family:'Zen Kaku Gothic New'; }
+  .rep-h2{ font-size:9pt; font-weight:700; margin:6pt 0 3pt; border-left:3pt solid #1C2541; padding-left:5pt; }
+  table.rep-table{ border-collapse:collapse; width:100%; margin-bottom:3pt; table-layout:fixed; }
+  table.rep-table th, table.rep-table td{ border:0.5pt solid #ccc; padding:1.3pt 4pt; font-size:7pt; text-align:center; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
   table.rep-table td.l{ text-align:left; }
-  table.rep-table th{ background:#eee; }
+  table.rep-table th{ background:#eee; font-size:7pt; padding:2pt 4pt; }
+  .weak-line{ font-size:7.5pt; line-height:1.6; }
   .up{ color:#3E7C59; font-weight:700; }
   .down{ color:#B23A48; font-weight:700; }
-  .empty{ color:#888; font-size:12px; }
-  @media print{ .toolbar{ display:none; } .report{ padding:14mm; } }
+  .empty{ color:#888; font-size:8pt; }
+  @media print{ .toolbar{ display:none; } }
 </style></head>
 <body>
   <div class="toolbar"><button onclick="window.print()">印刷 / PDFとして保存</button></div>
@@ -1006,7 +1149,7 @@ function StudentReportExport({ students, tests, scores, manuals }) {
         React.createElement("div", { className: "note", style: { marginTop: 10, fontSize: 11.5, color: "var(--ink-soft)" } }, "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u30D7\u30EC\u30D3\u30E5\u30FC\u304C\u958B\u304D\u307E\u3059\u3002\u300C\u5370\u5237 / PDF\u3068\u3057\u3066\u4FDD\u5B58\u300D\u304B\u3089\u7D19\u3078\u306E\u5370\u5237\u3001\u307E\u305F\u306FPDF\u4FDD\u5B58\u304C\u3067\u304D\u307E\u3059\u3002\u5168\u54E1\u5206\u3092\u307E\u3068\u3081\u3066\u51FA\u529B\u3059\u308B\u3068\u3001\u751F\u5F92\u3054\u3068\u306B\u81EA\u52D5\u3067\u6539\u30DA\u30FC\u30B8\u3055\u308C\u307E\u3059\u3002")));
 }
 
-function Teacher({ students, tests, scores, manuals, saveStudents, saveTests, saveScores, saveManuals, onBack, notify, teacherPass, saveTeacherPass }) {
+function Teacher({ students, tests, scores, manuals, saveStudents, saveTests, saveScoresForTest, saveManuals, onBack, notify, teacherPass, saveTeacherPass }) {
     const [tab, setTab] = useState("students");
     return (React.createElement("div", { className: "ss-wrap" },
         React.createElement(TopBar, { title: "\u5148\u751F\u7528\u7BA1\u7406\u753B\u9762", onBack: onBack }),
@@ -1033,8 +1176,8 @@ function Teacher({ students, tests, scores, manuals, saveStudents, saveTests, sa
                 React.createElement(Icon, { name: "lock", size: 14 }),
                 "\u8A2D\u5B9A")),
         tab === "students" && React.createElement(StudentManager, { students: students, saveStudents: saveStudents, notify: notify }),
-        tab === "tests" && React.createElement(TestManager, { tests: tests, saveTests: saveTests, saveScores: saveScores, scores: scores, notify: notify }),
-        tab === "scoring" && React.createElement(ScoreEntry, { students: students, tests: tests, scores: scores, saveScores: saveScores, notify: notify }),
+        tab === "tests" && React.createElement(TestManager, { tests: tests, saveTests: saveTests, saveScoresForTest: saveScoresForTest, scores: scores, notify: notify }),
+        tab === "scoring" && React.createElement(ScoreEntry, { students: students, tests: tests, scores: scores, saveScoresForTest: saveScoresForTest, notify: notify }),
         tab === "analytics" && React.createElement(TestAnalytics, { students: students, tests: tests, scores: scores }),
         tab === "reports" && React.createElement(StudentReportExport, { students: students, tests: tests, scores: scores, manuals: manuals }),
         tab === "manuals" && React.createElement(ManualManager, { manuals: manuals, tests: tests, saveManuals: saveManuals, notify: notify }),
@@ -1193,8 +1336,77 @@ function PasswordSettings({ currentPass, saveTeacherPass, notify }) {
             "\u5909\u66F4\u3059\u308B"),
         error && React.createElement("div", { className: "errmsg" }, error)));
 }
+function exportStudentsToExcel(students) {
+    if (!window.XLSX) {
+        alert("エクセル出力用のライブラリの読み込みに失敗しました。通信環境を確認し、ページを再読み込みしてから、もう一度お試しください。");
+        return;
+    }
+    const rows = students.map((s) => ({
+        "氏名": s.name || "",
+        "PIN": s.pin || "",
+        "高校名": s.highSchool || "",
+        "区分": s.isGraduate ? "卒業生" : "在籍生",
+        "志望大学": s.targetUniv || "",
+        "合格大学（卒業生）": s.isGraduate ? (s.admittedUniv || "") : "",
+        "学年／卒業年度": s.gradYear || "",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [
+        { wch: 14 }, { wch: 10 }, { wch: 20 }, { wch: 8 }, { wch: 22 }, { wch: 22 }, { wch: 16 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "生徒一覧");
+    const today = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `生徒一覧_${today}.xlsx`);
+}
+function handleCsvImport(e, students, saveStudents, notify) {
+    const file = e.target.files[0];
+    if (!file)
+        return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        const text = ev.target.result;
+        const lines = text.split(/\r?\n/);
+        let newStudents = [...students];
+        let addedCount = 0;
+        let updatedCount = 0;
+        let skipped = 0;
+        lines.forEach((line, idx) => {
+            const cols = line.split(",").map((c) => c.trim().replace(/^"|"$/g, "").trim());
+            if (cols.length < 2) {
+                skipped++;
+                return;
+            }
+            const name = cols[0];
+            const pin = cols[1];
+            if (!name || !pin) {
+                skipped++;
+                return;
+            }
+            if (idx === 0 && (name === "氏名" || name.toLowerCase() === "name" || name === "名前"))
+                return;
+            const highSchool = cols[2] || "";
+            const schoolBranch = cols[3] || "";
+            const targetUniv = cols[4] || "";
+            const gradYear = cols[5] || "";
+            const existing = newStudents.find((s) => s.name === name && s.pin === pin);
+            if (existing) {
+                newStudents = newStudents.map((s) => (s.id === existing.id ? { ...s, highSchool, schoolBranch, targetUniv, gradYear } : s));
+                updatedCount++;
+            }
+            else {
+                newStudents.push({ id: uid(), name, pin, highSchool, schoolBranch, targetUniv, gradYear, isGraduate: false, admittedUniv: "" });
+                addedCount++;
+            }
+        });
+        saveStudents(newStudents);
+        notify(`CSV取り込み完了：${addedCount}名追加、${updatedCount}名更新（スキップ:${skipped}行）`);
+        e.target.value = "";
+    };
+    reader.readAsText(file, "UTF-8");
+}
 function StudentManager({ students, saveStudents, notify }) {
-    const blank = { name: "", highSchool: "", targetUniv: "", pin: "", isGraduate: false, admittedUniv: "", gradYear: "" };
+    const blank = { name: "", highSchool: "", targetUniv: "", pin: "", isGraduate: false, admittedUniv: "", gradYear: "", schoolBranch: "" };
     const [form, setForm] = useState(blank);
     const [editingId, setEditingId] = useState(null);
     function startEdit(s) {
@@ -1202,6 +1414,7 @@ function StudentManager({ students, saveStudents, notify }) {
         setForm({
             name: s.name || "", highSchool: s.highSchool || "", targetUniv: s.targetUniv || "",
             pin: s.pin || "", isGraduate: !!s.isGraduate, admittedUniv: s.admittedUniv || "", gradYear: s.gradYear || "",
+            schoolBranch: s.schoolBranch || "",
         });
     }
     function cancelEdit() { setEditingId(null); setForm(blank); }
@@ -1241,7 +1454,10 @@ function StudentManager({ students, saveStudents, notify }) {
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "\u9AD8\u6821\u540D"),
                     React.createElement("input", { value: form.highSchool, onChange: (e) => setForm({ ...form, highSchool: e.target.value }), placeholder: "\u4F8B\uFF09\u3007\u3007\u9AD8\u7B49\u5B66\u6821" }))),
-            React.createElement("div", { className: "row2" },
+            React.createElement("div", { className: "row3" },
+                React.createElement("div", { className: "field" },
+                    React.createElement("label", null, "\u6821\u820E\u540D"),
+                    React.createElement("input", { value: form.schoolBranch, onChange: (e) => setForm({ ...form, schoolBranch: e.target.value }), placeholder: "\u4F8B\uFF09\u6885\u7530\u6821\u820E" })),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "\u5FD7\u671B\u5927\u5B66"),
                     React.createElement("input", { value: form.targetUniv, onChange: (e) => setForm({ ...form, targetUniv: e.target.value }), placeholder: "\u4F8B\uFF09\u3007\u3007\u5927\u5B66 \u7406\u5B66\u90E8" })),
@@ -1260,16 +1476,28 @@ function StudentManager({ students, saveStudents, notify }) {
                     editingId ? "更新する" : "登録する"),
                 editingId && React.createElement("button", { className: "btn ghost", onClick: cancelEdit }, "\u30AD\u30E3\u30F3\u30BB\u30EB"))),
         React.createElement("div", { className: "card" },
-            React.createElement("h2", null,
-                "\u751F\u5F92\u4E00\u89A7\uFF08",
-                students.length,
-                "\u540D\uFF09"),
+            React.createElement("h2", null, "CSV\u4E00\u62EC\u53D6\u308A\u8FBC\u307F"),
+            React.createElement("div", { className: "sub" }, "\u5217\u9806\uFF1A\u6C0F\u540D\u3001PIN\u3001\u9AD8\u6821\u540D\u3001\u6821\u820E\u540D\u3001\u5FD7\u671B\u5927\u5B66\u3001\u5B66\u5E74\uFF08\u5148\u982D\u884C\u30D8\u30C3\u30C0\u30FC\u306F\u81EA\u52D5\u30B9\u30AD\u30C3\u30D7\uFF09"),
+            React.createElement("div", { className: "field", style: { maxWidth: 400 } },
+                React.createElement("input", { type: "file", accept: ".csv", id: "csvInput", onChange: (e) => handleCsvImport(e, students, saveStudents, notify), style: { display: "block", width: "100%", padding: "8px 0", fontSize: 13, color: "var(--ink-soft)", cursor: "pointer" } })),
+            React.createElement("div", { className: "note", style: { fontSize: 11.5, color: "var(--ink-soft)", marginTop: 6 } }, "\u30B9\u30AD\u30C3\u30D7\u3055\u308C\u305F\u884C\u3084\u7A7A\u767D\u884C\u306F\u7121\u8996\u3002\u540C\u4E00\u6C0F\u540D+PIN\u306E\u751F\u5F92\u304C\u3059\u3067\u306B\u5B58\u5728\u3059\u308B\u5834\u5408\u306F\u4E0A\u66F8\u304D\u3057\u307E\u3059\u3002")),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 } },
+                React.createElement("h2", { style: { margin: 0 } },
+                    "\u751F\u5F92\u4E00\u89A7\uFF08",
+                    students.length,
+                    "\u540D\uFF09"),
+                students.length > 0 && (React.createElement("button", { className: "btn ghost", onClick: () => exportStudentsToExcel(students) },
+                    React.createElement(Icon, { name: "clipboard", size: 14 }),
+                    "\u30A8\u30AF\u30BB\u30EB\u3067\u51FA\u529B"))),
+            React.createElement("div", { style: { height: 16 } }),
             students.length === 0 ? React.createElement("div", { className: "empty" }, "\u307E\u3060\u751F\u5F92\u304C\u767B\u9332\u3055\u308C\u3066\u3044\u307E\u305B\u3093") : (React.createElement("div", { className: "tbl-wrap" },
                 React.createElement("table", null,
                     React.createElement("thead", null,
                         React.createElement("tr", null,
                             React.createElement("th", null, "\u6C0F\u540D"),
                             React.createElement("th", null, "PIN"),
+                            React.createElement("th", null, "\u6821\u820E"),
                             React.createElement("th", null, "\u9AD8\u6821"),
                             React.createElement("th", null, "\u5FD7\u671B\u5927\u5B66"),
                             React.createElement("th", null, "\u533A\u5206"),
@@ -1277,6 +1505,7 @@ function StudentManager({ students, saveStudents, notify }) {
                     React.createElement("tbody", null, students.map((s) => (React.createElement("tr", { key: s.id },
                         React.createElement("td", null, s.name),
                         React.createElement("td", { className: "ss-mono" }, s.pin),
+                        React.createElement("td", null, s.schoolBranch || "―"),
                         React.createElement("td", null, s.highSchool || "―"),
                         React.createElement("td", null, s.isGraduate ? (s.admittedUniv || "―") : (s.targetUniv || "―")),
                         React.createElement("td", null, s.isGraduate ? React.createElement("span", { className: "pill grad" },
@@ -1288,7 +1517,7 @@ function StudentManager({ students, saveStudents, notify }) {
                             React.createElement("button", { className: "btn danger", onClick: () => removeStudent(s.id) },
                                 React.createElement(Icon, { name: "trash", size: 14 })))))))))))));
 }
-function TestManager({ tests, saveTests, saveScores, scores, notify }) {
+function TestManager({ tests, saveTests, saveScoresForTest, scores, notify }) {
     const blank = { name: "", date: "", maxScore: 100, tagsInput: "", pdfUrl: "", videoUrl: "", description: "", course: "" };
     const [form, setForm] = useState(blank);
     const [editingId, setEditingId] = useState(null);
@@ -1326,7 +1555,7 @@ function TestManager({ tests, saveTests, saveScores, scores, notify }) {
         if (!confirm("このテストを削除しますか？（関連する得点データも削除されます）"))
             return;
         saveTests(tests.filter((t) => t.id !== id));
-        saveScores(scores.filter((sc) => sc.testId !== id));
+        saveScoresForTest(id, []);
         if (editingId === id)
             cancelEdit();
         notify("テストを削除しました");
@@ -1407,7 +1636,7 @@ function TestManager({ tests, saveTests, saveScores, scores, notify }) {
                             React.createElement("button", { className: "btn danger", onClick: () => removeTest(t.id) },
                                 React.createElement(Icon, { name: "trash", size: 14 })))))))))))));
 }
-function ScoreEntry({ students, tests, scores, saveScores, notify }) {
+function ScoreEntry({ students, tests, scores, saveScoresForTest, notify }) {
     var _a;
     const activeStudents = students.filter((s) => !s.isGraduate);
     const graduateStudents = students.filter((s) => s.isGraduate);
@@ -1421,8 +1650,12 @@ function ScoreEntry({ students, tests, scores, saveScores, notify }) {
             return;
         const d = {};
         [...activeStudents, ...graduateStudents].forEach((s) => {
-            const v = scoreFor(scores, s.id, testId);
-            d[s.id] = v == null ? "" : String(v);
+            if (isAbsentEntry(scores, s.id, testId)) {
+                d[s.id] = "\u672A\u53D7\u9A13";
+            } else {
+                const v = scoreFor(scores, s.id, testId);
+                d[s.id] = v == null ? "" : String(v);
+            }
         });
         setDraft(d);
     }, [testId]);
@@ -1430,11 +1663,16 @@ function ScoreEntry({ students, tests, scores, saveScores, notify }) {
         return React.createElement("div", { className: "card" },
             React.createElement("div", { className: "empty" }, "\u5148\u306B\u300C\u30C6\u30B9\u30C8\u7BA1\u7406\u300D\u304B\u3089\u30C6\u30B9\u30C8\u3092\u767B\u9332\u3057\u3066\u304F\u3060\u3055\u3044"));
     function save() {
-        const others = scores.filter((sc) => sc.testId !== testId);
         const mine = Object.entries(draft)
-            .filter(([, v]) => v !== "" && v != null && !isNaN(Number(v)))
-            .map(([studentId, v]) => ({ studentId, testId, score: Number(v) }));
-        saveScores([...others, ...mine]);
+            .map(([studentId, v]) => {
+                const trimmed = (v || "").trim();
+                if (trimmed === "") return null;
+                if (trimmed === "\u672A\u53D7\u9A13") return { studentId, testId, absent: true };
+                if (!isNaN(Number(trimmed))) return { studentId, testId, score: Number(trimmed) };
+                return null;
+            })
+            .filter((x) => x != null);
+        saveScoresForTest(testId, mine);
         notify("得点を保存しました");
     }
     const currentTest = tests.find((t) => t.id === testId);
@@ -1443,7 +1681,7 @@ function ScoreEntry({ students, tests, scores, saveScores, notify }) {
         React.createElement("div", { className: "sub" },
             "\u30C6\u30B9\u30C8\u3092\u9078\u3073\u3001\u5404\u751F\u5F92\u306E\u5F97\u70B9\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u6E80\u70B9\uFF1A", currentTest === null || currentTest === void 0 ? void 0 :
             currentTest.maxScore,
-            "\uFF09"),
+            "\uFF09\u3002\u6B20\u5E2D\u7B49\u3067\u53D7\u9A13\u3057\u3066\u3044\u306A\u3044\u5834\u5408\u306F\u300C\u672A\u53D7\u9A13\u300D\u3068\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u7A7A\u6B04\u306E\u307E\u307E\u306B\u3059\u308B\u3068\u3001\u305D\u306E\u30B3\u30FC\u30B9\u3092\u53D7\u8B1B\u3057\u3066\u3044\u306A\u3044\u751F\u5F92\u3068\u3057\u3066\u6271\u308F\u308C\u307E\u3059\uFF09\u3002"),
         React.createElement("div", { className: "field", style: { maxWidth: 360 } },
             React.createElement("label", null, "\u30C6\u30B9\u30C8\u3092\u9078\u629E"),
             React.createElement("select", { value: testId, onChange: (e) => setTestId(e.target.value) }, sortedTests.map((t) => React.createElement("option", { key: t.id, value: t.id },
@@ -1539,9 +1777,12 @@ function StudentDashboard({ studentId, students, tests, scores, manuals, onLogou
     const myTests = useMemo(() => [...filteredTests]
         .filter((t) => scoreFor(scores, studentId, t.id) != null)
         .sort((a, b) => (a.date || "").localeCompare(b.date || "")), [filteredTests, scores, studentId]);
+    const myTestsWithAbsent = useMemo(() => [...filteredTests]
+        .filter((t) => hasEntry(scores, studentId, t.id))
+        .sort((a, b) => (a.date || "").localeCompare(b.date || "")), [filteredTests, scores, studentId]);
     const trendData = myTests.map((t) => {
         const my = scoreFor(scores, studentId, t.id);
-        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId)).map((sc) => sc.score);
+        const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId) && sc.score != null).map((sc) => sc.score);
         const classAvg = avg(classVals);
         return { name: t.name, date: t.date, 自分: my, 平均: classAvg == null ? null : Math.round(classAvg * 10) / 10, maxScore: t.maxScore };
     });
@@ -1555,7 +1796,7 @@ function StudentDashboard({ studentId, students, tests, scores, manuals, onLogou
     const latestTest = myTests[myTests.length - 1];
     const latestDelta = latestTest ? (() => {
         const my = scoreFor(scores, studentId, latestTest.id);
-        const classVals = scores.filter((sc) => sc.testId === latestTest.id && activeIds.includes(sc.studentId)).map((sc) => sc.score);
+        const classVals = scores.filter((sc) => sc.testId === latestTest.id && activeIds.includes(sc.studentId) && sc.score != null).map((sc) => sc.score);
         const cAvg = avg(classVals);
         return cAvg == null ? null : my - cAvg;
     })() : null;
@@ -1639,21 +1880,23 @@ function StudentDashboard({ studentId, students, tests, scores, manuals, onLogou
                                 React.createElement("th", null, "PDF"),
                                 React.createElement("th", null, "\u30DE\u30CB\u30E5\u30A2\u30EB"),
                                 React.createElement("th", null, "\u6388\u696D\u6620\u50CF"))),
-                        React.createElement("tbody", null, myTests.map((t) => {
+                        React.createElement("tbody", null, myTestsWithAbsent.map((t) => {
+                            const absent = isAbsentEntry(scores, studentId, t.id);
                             const my = scoreFor(scores, studentId, t.id);
-                            const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId)).map((sc) => sc.score);
+                            const classVals = scores.filter((sc) => sc.testId === t.id && activeIds.includes(sc.studentId) && sc.score != null).map((sc) => sc.score);
                             const cAvg = avg(classVals);
-                            const d = cAvg == null ? null : my - cAvg;
+                            const d = (absent || cAvg == null) ? null : my - cAvg;
                             const testManuals = (t.tags || []).flatMap((tag) => manualsFor(manuals, tag));
                             return (React.createElement("tr", { key: t.id },
                                 React.createElement("td", null, t.name),
                                 React.createElement("td", { className: "ss-mono" }, t.date || "―"),
-                                React.createElement("td", { className: "ss-mono" },
-                                    my,
-                                    "/",
-                                    t.maxScore),
-                                React.createElement("td", { className: "ss-mono" }, cAvg == null ? "―" : fmt1(cAvg)),
-                                React.createElement("td", { className: "ss-mono " + (d > 0 ? "delta up" : d < 0 ? "delta down" : "delta flat") }, d == null ? "―" : (d > 0 ? "+" : "") + fmt1(d)),
+                                absent
+                                    ? React.createElement("td", { colSpan: 3, style: { color: "var(--ink-soft)" } }, "\u672A\u53D7\u9A13")
+                                    : [
+                                        React.createElement("td", { key: "my", className: "ss-mono" }, my, "/", t.maxScore),
+                                        React.createElement("td", { key: "avg", className: "ss-mono" }, cAvg == null ? "―" : fmt1(cAvg)),
+                                        React.createElement("td", { key: "d", className: "ss-mono " + (d > 0 ? "delta up" : d < 0 ? "delta down" : "delta flat") }, d == null ? "―" : (d > 0 ? "+" : "") + fmt1(d)),
+                                    ],
                                 React.createElement("td", null, t.pdfUrl ? React.createElement("a", { href: t.pdfUrl, target: "_blank", rel: "noreferrer", style: { color: "var(--ink)" } }, "\u554F\u984C\u3092\u898B\u308B") : "―"),
                                 React.createElement("td", null, testManuals.length === 0 ? "―" : (React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 } }, testManuals.map((m, i) => (React.createElement("a", { key: m.id, href: m.url, target: "_blank", rel: "noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11.5, color: "var(--ink-soft)", background: "#F1EFE8", padding: "3px 9px", borderRadius: 12, textDecoration: "none" } },
                                     React.createElement(Icon, { name: "book", size: 11 }),
@@ -1753,16 +1996,21 @@ function App() {
     const [manuals, setManuals] = useState([]);
     useEffect(() => {
         (async () => {
-            const [s, t, sc, tp, mn] = await Promise.all([
+            const [s, t, tp, mn] = await Promise.all([
                 safeGet(KEYS.students, []),
                 safeGet(KEYS.tests, []),
-                safeGet(KEYS.scores, []),
                 safeGet(KEYS.teacherPass, ""),
                 safeGet(KEYS.manuals, []),
             ]);
+            const oldScores = await safeGet(KEYS.scores, []);
+            const perTestResults = await Promise.all(t.map((test) => safeGet(scoresKeyFor(test.id), null)));
+            const combinedScores = t.flatMap((test, i) => {
+                const perTest = perTestResults[i];
+                return perTest !== null ? perTest : oldScores.filter((sc) => sc.testId === test.id);
+            });
             setStudents(s);
             setTests(t);
-            setScores(sc);
+            setScores(combinedScores);
             setTeacherPass(tp);
             setManuals(mn);
             setLoading(false);
@@ -1773,14 +2021,29 @@ function App() {
         window.clearTimeout(window.__ssToastTimer);
         window.__ssToastTimer = window.setTimeout(() => setToast(""), 2200);
     }
-    async function saveStudents(list) { setStudents(list); await safeSet(KEYS.students, list); }
-    async function saveTests(list) { setTests(list); await safeSet(KEYS.tests, list); }
-    async function saveScores(list) { setScores(list); await safeSet(KEYS.scores, list); }
+    async function saveStudents(listOrUpdater) {
+        let resolved;
+        setStudents((prev) => { resolved = typeof listOrUpdater === "function" ? listOrUpdater(prev) : listOrUpdater; return resolved; });
+        await safeSet(KEYS.students, resolved);
+    }
+    async function saveTests(listOrUpdater) {
+        let resolved;
+        setTests((prev) => { resolved = typeof listOrUpdater === "function" ? listOrUpdater(prev) : listOrUpdater; return resolved; });
+        await safeSet(KEYS.tests, resolved);
+    }
+    async function saveScoresForTest(testId, list) {
+        setScores((prev) => [...prev.filter((sc) => sc.testId !== testId), ...list]);
+        await safeSet(scoresKeyFor(testId), list);
+    }
     async function saveTeacherPass(pw) { setTeacherPass(pw); await safeSet(KEYS.teacherPass, pw); }
-    async function saveManuals(list) { setManuals(list); await safeSet(KEYS.manuals, list); }
+    async function saveManuals(listOrUpdater) {
+        let resolved;
+        setManuals((prev) => { resolved = typeof listOrUpdater === "function" ? listOrUpdater(prev) : listOrUpdater; return resolved; });
+        await safeSet(KEYS.manuals, resolved);
+    }
     return (React.createElement(React.Fragment, null,
         loading ? (React.createElement("div", { className: "ss-wrap" },
-            React.createElement("div", { className: "empty" }, "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026"))) : view === "home" ? (React.createElement(Home, { onSelect: setView })) : view === "teacher-gate" ? (React.createElement(TeacherGate, { teacherPass: teacherPass, onSetPassword: async (pw) => { await saveTeacherPass(pw); setView("teacher"); }, onLogin: () => setView("teacher"), onBack: () => setView("home") })) : view === "teacher" ? (React.createElement(Teacher, { students: students, tests: tests, scores: scores, manuals: manuals, saveStudents: saveStudents, saveTests: saveTests, saveScores: saveScores, saveManuals: saveManuals, onBack: () => setView("home"), notify: notify, teacherPass: teacherPass, saveTeacherPass: saveTeacherPass })) : view === "student-login" ? (React.createElement(StudentLogin, { students: students, onBack: () => setView("home"), onLogin: (id) => { setStudentId(id); setView("student-dashboard"); } })) : view === "student-dashboard" ? (React.createElement(StudentDashboard, { studentId: studentId, students: students, tests: tests, scores: scores, manuals: manuals, onLogout: () => { setStudentId(null); setView("home"); } })) : null,
+            React.createElement("div", { className: "empty" }, "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026"))) : view === "home" ? (React.createElement(Home, { onSelect: setView })) : view === "teacher-gate" ? (React.createElement(TeacherGate, { teacherPass: teacherPass, onSetPassword: async (pw) => { await saveTeacherPass(pw); setView("teacher"); }, onLogin: () => setView("teacher"), onBack: () => setView("home") })) : view === "teacher" ? (React.createElement(Teacher, { students: students, tests: tests, scores: scores, manuals: manuals, saveStudents: saveStudents, saveTests: saveTests, saveScoresForTest: saveScoresForTest, saveManuals: saveManuals, onBack: () => setView("home"), notify: notify, teacherPass: teacherPass, saveTeacherPass: saveTeacherPass })) : view === "student-login" ? (React.createElement(StudentLogin, { students: students, onBack: () => setView("home"), onLogin: (id) => { setStudentId(id); setView("student-dashboard"); } })) : view === "student-dashboard" ? (React.createElement(StudentDashboard, { studentId: studentId, students: students, tests: tests, scores: scores, manuals: manuals, onLogout: () => { setStudentId(null); setView("home"); } })) : null,
         React.createElement(Toast, { text: toast })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App, null));
